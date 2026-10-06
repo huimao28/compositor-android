@@ -14,3 +14,6 @@ local.properties
 # OS
 .DS_Store
 Thumbs.db
+
+# wrapper jar 以 base64 形式存放（见 scripts/restore-wrapper.sh），二进制不进仓库
+/gradle/wrapper/gradle-wrapper.jar
