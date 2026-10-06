@@ -26,7 +26,7 @@
 
 验收：与 Mac 版互导一个多图层 `.comp` 文件夹，图层顺序/不透明度/混合模式一致。
 
-## Phase 2 — 像素引擎（🚧 代码+本地 60 测试已完成，待 CI 验证）
+## Phase 2 — 像素引擎（✅ 已完成，2026-10-07；CI 全绿）
 
 - `:core` 纯 Kotlin 像素引擎（架构铁律：禁止 Android API，单元测试覆盖）：
   - `Raster.kt`：`RasterImage`（直通 alpha ARGB_8888）+ `compositePixel`（PDF 基础 alpha 合成公式）
