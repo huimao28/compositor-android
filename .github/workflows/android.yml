@@ -31,8 +31,8 @@ jobs:
           if [ $code -ne 0 ]; then
             echo "Gradle log tail:"
             tail -n 60 /tmp/core-test.log
-            echo "---- publishing tail as annotations ----"
-            tail -n 40 /tmp/core-test.log | sed 's/^/::error::/'
+            echo "---- publishing diagnostics as annotations ----"
+            { grep -A 12 "What went wrong" /tmp/core-test.log; echo "====="; grep -m 5 "Caused by" /tmp/core-test.log; echo "====="; grep -m 10 -B2 -A8 "^e: " /tmp/core-test.log; } | head -n 60 | sed 's/^/::error::/'
             exit $code
           fi
 
