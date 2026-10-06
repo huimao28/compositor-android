@@ -1,18 +1,21 @@
 package com.huimao.compositor.core
 
 /**
- * Undo/redo over immutable [Document] snapshots.
+ * Undo/redo over immutable snapshots.
  *
  * Upstream keeps undo history in-session only and starts with clean history on
- * open; this port does the same ([clear]). Pixel-level undo arrives with the
- * raster engine in Phase 2 — for now a snapshot covers the whole document
- * model (layers, visibility, opacity, blend modes, hierarchy).
+ * open; this port does the same ([clear]).
+ *
+ * @param T the snapshot type. Use [Document] for model-only history, or
+ *   [PixelSession] for pixel-exact stroke undo (Phase 2): a stroke returns a
+ *   new raster instead of mutating, so restoring the pre-stroke snapshot
+ *   restores every pixel exactly.
  */
-class DocumentHistory(initial: Document, private val maxDepth: Int = 100) {
-    private val past = ArrayDeque<Document>()
-    private val future = ArrayDeque<Document>()
+open class History<T>(initial: T, private val maxDepth: Int = 100) {
+    private val past = ArrayDeque<T>()
+    private val future = ArrayDeque<T>()
 
-    var current: Document = initial
+    var current: T = initial
         private set
 
     val canUndo: Boolean get() = past.isNotEmpty()
@@ -24,7 +27,7 @@ class DocumentHistory(initial: Document, private val maxDepth: Int = 100) {
      * Records [next] as the new current state and clears the redo stack.
      * No-op when [next] equals [current] (avoids junk undo steps).
      */
-    fun commit(next: Document) {
+    fun commit(next: T) {
         if (next == current) return
         past.addLast(current)
         if (past.size > maxDepth) past.removeFirst()
@@ -54,3 +57,19 @@ class DocumentHistory(initial: Document, private val maxDepth: Int = 100) {
         future.clear()
     }
 }
+
+/** Model-only history; kept as an alias so existing call sites keep working. */
+typealias DocumentHistory = History<Document>
+
+/**
+ * The editable pixel state of a document: the model plus one raster per
+ * image layer, keyed by layer id. Rasters are treated as immutable values —
+ * brush strokes return new instances — so a snapshot is pixel-exact.
+ */
+data class PixelSession(
+    val document: Document,
+    val rasters: Map<String, RasterImage>,
+)
+
+/** Pixel-exact undo/redo for brush strokes and other raster edits. */
+typealias PixelHistory = History<PixelSession>

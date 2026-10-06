@@ -17,11 +17,16 @@ import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * 主编辑界面。抄桌面端布局：左工具条 | 中画布 | 右图层面板。
@@ -33,6 +38,13 @@ fun EditorScreen() {
     val activity = LocalContext.current as Activity
     val windowSizeClass = calculateWindowSizeClass(activity)
     var layersVisible by remember { mutableStateOf(true) }
+
+    // Phase 2 演示：后台线程合成一张图，主线程转 ImageBitmap 显示。
+    val demoImage by produceState<ImageBitmap?>(initialValue = null) {
+        value = withContext(Dispatchers.Default) {
+            buildDemoComposite().toAndroidBitmap().asImageBitmap()
+        }
+    }
 
     Scaffold(
         topBar = { EditorTopBar(onToggleLayers = { layersVisible = !layersVisible }) },
@@ -46,6 +58,7 @@ fun EditorScreen() {
                 ) {
                     ToolStrip()
                     CanvasArea(
+                        image = demoImage,
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight(),
@@ -66,6 +79,7 @@ fun EditorScreen() {
                         .padding(padding),
                 ) {
                     CanvasArea(
+                        image = demoImage,
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth(),

@@ -26,11 +26,23 @@
 
 验收：与 Mac 版互导一个多图层 `.comp` 文件夹，图层顺序/不透明度/混合模式一致。
 
-## Phase 2 — 像素引擎
+## Phase 2 — 像素引擎（🚧 代码+本地 60 测试已完成，待 CI 验证）
 
-- 基于 Android Bitmap 的 RasterSurface；图层合成（9 种混合模式逐像素实现，对照 PDF 规范）
-- 画笔引擎：按上游 brush-performance.md（spacing + stroke opacity 上限）
-- CanvasArea 接入真实渲染；棋盘格保留为透明背景
+- `:core` 纯 Kotlin 像素引擎（架构铁律：禁止 Android API，单元测试覆盖）：
+  - `Raster.kt`：`RasterImage`（直通 alpha ARGB_8888）+ `compositePixel`（PDF 基础 alpha 合成公式）
+  - `BlendMode.blend`：9 种混合模式逐像素实现，对照 PDF 32000 §11.3.5（Normal/Multiply/Screen/
+    Overlay/Darken/Lighten/ColorDodge/ColorBurn/Difference）
+  - `Compositor.kt`：`compositeDocument` bottom-to-top 合成（visibility/分组继承/opacity/混合模式），
+    图层经 Transform 做仿射放置（翻转/缩放到 size/顺时针旋转/平移），双线性反向采样
+  - `Brush.kt`：画笔引擎（对照上游 `docs/brush-performance.md`）：dab 间距 = 直径 × 2.5%（软）/
+    1.5%（硬）；软笔刷余弦衰减、硬笔刷 1px 抗锯齿边缘；opacity 上限作用于整笔累积；
+    笔触不修改原图（返回新 RasterImage）
+  - `History<T>` 泛型化：`DocumentHistory = History<Document>`（旧调用不变），
+    新增 `PixelSession`（Document + 图层 rasters）与 `PixelHistory`，一笔 undo 像素精确还原
+- `:app`：`BitmapBridge`（直通→预乘 alpha 转 Android Bitmap）、`DemoDocument`（渐变背景 +
+  软笔刷笔触 + Multiply 绿圆 + 旋转 Screen 黄方块，真实走合成管线）、`CanvasArea` 绘制合成图，
+  棋盘格保留为透明背景；合成在 `Dispatchers.Default` 后台线程执行
+- 测试：60 个全过（35 旧 + 25 新：混合公式/合成/变换放置/画笔/undo）
 
 验收：合成结果与桌面端像素级一致（抽样测试）；一笔 undo 还原像素精确。
 
