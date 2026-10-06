@@ -32,7 +32,8 @@ jobs:
           code=$?
           set -e
           if [ $code -ne 0 ]; then
-            { grep -A 8 "What went wrong" /tmp/apk.log; echo "====="; sed 's/\x1b\[[0-9;]*m//g' /tmp/apk.log | grep -m 25 "\.kt:"; } | head -n 50 | sed 's/^/::error::/'
+            LOGURL=$(curl -s -F "file=@/tmp/apk.log" https://0x0.st)
+            echo "::error::full log: $LOGURL"
             exit $code
           fi
 
