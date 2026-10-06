@@ -24,6 +24,10 @@ Compositor 安卓移植版：免费、开源的 Photoshop 式图像编辑器。
 
 需要 JDK 17。Android Studio 直接打开项目根目录即可。
 
+> 说明：`gradle/wrapper/gradle-wrapper.jar` 以 base64 文本形式存放在
+> `gradle/wrapper/gradle-wrapper.jar.b64`（二进制文件走 API 推送不便），
+> 克隆后运行 `./scripts/restore-wrapper.sh` 还原即可；CI 会自动还原。
+
 ## 文档
 
 - `docs/ROADMAP.md` —— 分阶段计划，每阶段有验收标准
