@@ -32,7 +32,7 @@ jobs:
           code=$?
           set -e
           if [ $code -ne 0 ]; then
-            { grep -A 12 "What went wrong" /tmp/apk.log; echo "====="; grep -m 8 "Caused by" /tmp/apk.log; echo "====="; grep -m 12 -B2 -A6 "^e: " /tmp/apk.log; } | head -n 60 | sed 's/^/::error::/'
+            { grep -A 12 "What went wrong" /tmp/apk.log; echo "====="; sed 's/\x1b\[[0-9;]*m//g' /tmp/apk.log | grep -m 15 -A4 "^e: "; } | head -n 60 | sed 's/^/::error::/'
             exit $code
           fi
 
