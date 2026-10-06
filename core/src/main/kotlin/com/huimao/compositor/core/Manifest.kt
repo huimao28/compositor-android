@@ -4,19 +4,31 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /**
- * .comp manifest (de)serialization, upstream format v1–v3 subset.
+ * `.comp` manifest (de)serialization.
  *
- * A .comp project is a folder containing manifest.json plus
- * images/<layer UUID>.png assets. Field names follow the upstream
- * spec (docs/project-format.md); transform subfield names should be
- * re-verified against ProjectStore.swift in Phase 1.
+ * Field names are verified against upstream
+ * `Compositor/IO/ProjectStore.swift` (`ProjectManifest` / `ProjectLayerRecord` /
+ * `LayerTransform`). A `.comp` package is a folder containing `manifest.json`
+ * plus `images/<layer UUID>.png` assets; the manifest's `imageFile` field is
+ * the bare filename.
+ *
+ * Phase 1 implements the v1–v3 subset (layers, groups, opacity, 9 blend modes).
+ * Reading accepts versions 1–11 and ignores unknown fields (additive v4+
+ * features like masks/adjustments/text are dropped, which is documented in
+ * `docs/project-format.md`); new saves declare version [MANIFEST_VERSION].
  */
-const val MANIFEST_ID = "com.compositor.project"
+const val MANIFEST_FORMAT = "com.compositor.project"
 
-/** New saves declare this version; versions 1..3 remain readable. */
+/** Version new saves declare. */
 const val MANIFEST_VERSION = 3
 
+/** Highest version this reader accepts (matches upstream `ProjectManifest.current`). */
+const val MANIFEST_VERSION_MAX = 11
+
+const val MANIFEST_COLOR_SPACE = "sRGB"
+
 private const val MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+private const val MAX_NAME_UTF8 = 16_384
 
 @Serializable
 data class ManifestPoint(val x: Double = 0.0, val y: Double = 0.0)
@@ -30,59 +42,68 @@ data class ManifestTransform(
     val size: ManifestSize = ManifestSize(),
     /** clockwise degrees */
     val rotation: Double = 0.0,
-    val flipHorizontal: Boolean = false,
-    val flipVertical: Boolean = false,
+    val flipX: Boolean = false,
+    val flipY: Boolean = false,
+    val sampling: String = LayerSampling.HIGH.serialName,
 )
 
 @Serializable
 data class ManifestLayer(
-    val uuid: String,
+    val id: String,
     val name: String,
-    val visible: Boolean = true,
+    val isVisible: Boolean = true,
     val transform: ManifestTransform = ManifestTransform(),
+    val imageFile: String? = null,
     val parentID: String? = null,
     val isGroup: Boolean = false,
     val opacity: Double = 1.0,
-    val blendMode: String = "Normal",
-    val imageFile: String? = null,
+    val blendMode: String = BlendMode.NORMAL.serialName,
 )
 
 @Serializable
 data class Manifest(
-    val id: String = MANIFEST_ID,
+    val format: String = MANIFEST_FORMAT,
     val version: Int = MANIFEST_VERSION,
-    val documentUUID: String,
+    val colorSpace: String = MANIFEST_COLOR_SPACE,
+    val resolution: Double? = null,
+    val documentID: String,
     val width: Int,
     val height: Int,
-    val activeLayerUUID: String? = null,
+    val activeLayerID: String? = null,
     val layers: List<ManifestLayer> = emptyList(),
 )
 
-private val manifestJson = Json { prettyPrint = true; encodeDefaults = true }
+private val manifestJson = Json {
+    prettyPrint = true
+    encodeDefaults = true
+    ignoreUnknownKeys = true
+    explicitNulls = false
+}
 
 private fun Layer.toManifest() = ManifestLayer(
-    uuid = id,
+    id = id,
     name = name,
-    visible = visible,
+    isVisible = visible,
     transform = ManifestTransform(
         origin = ManifestPoint(transform.x, transform.y),
         size = ManifestSize(transform.width, transform.height),
         rotation = transform.rotation,
-        flipHorizontal = transform.flipHorizontal,
-        flipVertical = transform.flipVertical,
+        flipX = transform.flipX,
+        flipY = transform.flipY,
+        sampling = transform.sampling.serialName,
     ),
+    imageFile = imageFile,
     parentID = parentId,
     isGroup = kind == LayerKind.GROUP,
     opacity = opacity,
     blendMode = blendMode.serialName,
-    imageFile = imageFile,
 )
 
 private fun ManifestLayer.toLayer() = Layer(
-    id = uuid,
+    id = id,
     name = name,
     kind = if (isGroup) LayerKind.GROUP else LayerKind.RASTER,
-    visible = visible,
+    visible = isVisible,
     opacity = opacity,
     blendMode = BlendMode.fromSerialName(blendMode),
     transform = Transform(
@@ -91,8 +112,9 @@ private fun ManifestLayer.toLayer() = Layer(
         width = transform.size.width,
         height = transform.size.height,
         rotation = transform.rotation,
-        flipHorizontal = transform.flipHorizontal,
-        flipVertical = transform.flipVertical,
+        flipX = transform.flipX,
+        flipY = transform.flipY,
+        sampling = LayerSampling.fromSerialName(transform.sampling),
     ),
     parentId = parentID,
     imageFile = imageFile,
@@ -100,37 +122,123 @@ private fun ManifestLayer.toLayer() = Layer(
 
 fun Document.toManifestJson(): String {
     val manifest = Manifest(
-        documentUUID = id,
+        documentID = id,
         width = width,
         height = height,
-        activeLayerUUID = activeLayerId,
+        activeLayerID = activeLayerId,
         layers = layers.map { it.toManifest() },
     )
+    validateManifest(manifest)
     return manifestJson.encodeToString(Manifest.serializer(), manifest)
 }
 
-private fun isSafeImagePath(path: String): Boolean =
-    path.startsWith("images/") && !path.contains("..") && '/' !in path.removePrefix("images/")
-
-/** Reads a manifest written by us or by the Mac app (v1–v3). Rejects invalid metadata. */
+/**
+ * Reads a manifest written by us or by the Mac app (v1–v11).
+ * Rejects invalid metadata following upstream `ProjectStore.validate`,
+ * restricted to the v1–v3 subset this port implements.
+ */
 fun documentFromManifestJson(text: String): Document {
     require(text.toByteArray().size <= MAX_MANIFEST_BYTES) { "manifest too large" }
-    val manifest = manifestJson.decodeFromString(Manifest.serializer(), text)
-    require(manifest.id == MANIFEST_ID) { "not a Compositor project (id=${manifest.id})" }
-    require(manifest.version in 1..MANIFEST_VERSION) {
+    val header = try {
+        manifestJson.decodeFromString(Manifest.serializer(), text)
+    } catch (e: Exception) {
+        throw IllegalArgumentException("not a Compositor project: ${e.message}")
+    }
+    validateManifest(header)
+    return Document(
+        id = header.documentID,
+        width = header.width,
+        height = header.height,
+        activeLayerId = header.activeLayerID,
+        layers = header.layers.map { it.toLayer() },
+    )
+}
+
+private fun validateManifest(manifest: Manifest) {
+    require(manifest.format == MANIFEST_FORMAT) {
+        "not a Compositor project (format=${manifest.format})"
+    }
+    require(manifest.version in 1..MANIFEST_VERSION_MAX) {
         "unsupported manifest version ${manifest.version}"
     }
-    manifest.layers.forEach { layer ->
-        layer.imageFile?.let { path ->
-            require(isSafeImagePath(path)) { "unsafe image path: $path" }
-        }
-        require(layer.opacity in 0.0..1.0) { "opacity out of range on layer ${layer.uuid}" }
+    require(manifest.colorSpace == MANIFEST_COLOR_SPACE) {
+        "unsupported color space ${manifest.colorSpace}"
     }
-    return Document(
-        id = manifest.documentUUID,
-        width = manifest.width,
-        height = manifest.height,
-        activeLayerId = manifest.activeLayerUUID,
-        layers = manifest.layers.map { it.toLayer() },
-    )
+    manifest.resolution?.let {
+        require(it.isFinite() && it in 1.0..9600.0) { "invalid resolution $it" }
+    }
+    require(manifest.width in 1..Document.MAX_CANVAS_SIDE && manifest.height in 1..Document.MAX_CANVAS_SIDE) {
+        "canvas dimensions out of range: ${manifest.width}x${manifest.height}"
+    }
+    require(manifest.layers.size <= Document.MAX_LAYERS) { "too many layers: ${manifest.layers.size}" }
+
+    val ids = mutableSetOf<String>()
+    for (layer in manifest.layers) {
+        require(ids.add(layer.id)) { "duplicate layer id ${layer.id}" }
+        require(layer.name.trim().isNotEmpty()) { "layer has blank name" }
+        require(layer.name.toByteArray().size <= MAX_NAME_UTF8) { "layer name too long" }
+        require(layer.transform.toTransform().isValid) { "invalid transform on layer ${layer.id}" }
+        require(layer.imageFile == null || layer.imageFile == "${layer.id}.png") {
+            "unsafe image path: ${layer.imageFile}"
+        }
+        require(layer.opacity.isFinite() && layer.opacity in 0.0..1.0) {
+            "opacity out of range on layer ${layer.id}"
+        }
+        // Version gates (upstream ProjectStore.validate, v3-relevant subset).
+        if (manifest.version < 3) {
+            require(layer.opacity == 1.0 && layer.blendMode == BlendMode.NORMAL.serialName) {
+                "appearance values require manifest v3+ (layer ${layer.id})"
+            }
+        }
+        if (layer.isGroup) {
+            require(layer.imageFile == null) { "group ${layer.id} cannot carry an image" }
+            require(layer.blendMode == BlendMode.NORMAL.serialName) {
+                "group ${layer.id} must use Normal blend mode"
+            }
+            if (manifest.version < 8) {
+                require(layer.opacity == 1.0) { "group opacity requires manifest v8+ (layer ${layer.id})" }
+            }
+        }
+        if (manifest.version == 1) {
+            require(layer.parentID == null && !layer.isGroup) {
+                "groups require manifest v2+ (layer ${layer.id})"
+            }
+        }
+    }
+    validateHierarchy(manifest.layers)
+    manifest.activeLayerID?.let {
+        require(it in ids) { "active layer $it does not exist" }
+    }
+}
+
+private fun ManifestTransform.toTransform() = Transform(
+    x = origin.x,
+    y = origin.y,
+    width = size.width,
+    height = size.height,
+    rotation = rotation,
+    flipX = flipX,
+    flipY = flipY,
+    sampling = LayerSampling.fromSerialName(sampling),
+)
+
+/**
+ * Upstream `LayerHierarchy.validate`: every parent must exist and be a group,
+ * no cycles, at most 64 ancestor levels.
+ */
+private fun validateHierarchy(layers: List<ManifestLayer>) {
+    val byId = layers.associateBy { it.id }
+    for (layer in layers) {
+        val seen = mutableSetOf(layer.id)
+        var parent = layer.parentID
+        while (parent != null) {
+            require(seen.size <= 64 && seen.add(parent)) { "layer hierarchy cycle or too deep at ${layer.id}" }
+            val node = byId[parent]
+            require(node != null && node.isGroup) { "parent $parent of ${layer.id} is missing or not a group" }
+            parent = node.parentID
+        }
+        if (layer.isGroup) {
+            require(seen.size <= 64) { "group nesting too deep at ${layer.id}" }
+        }
+    }
 }

@@ -13,12 +13,16 @@
 
 验收：`./gradlew :core:test` 全绿；`./gradlew :app:assembleDebug` 产出可安装 APK。
 
-## Phase 1 — 文档模型 hardened
+## Phase 1 — 文档模型 hardened（✅ 已完成，2026-10-07）
 
 - manifest 字段与上游 `ProjectStore.swift` 逐项核对（含 transform 子字段命名）
-- 分组校验（parentID 存在性、防环、64 层上限）、visibility 继承语义
-- 不安全路径/超限 manifest 的拒绝测试（已部分覆盖，补齐 4 MiB / 512 MiB / 10000 层边界）
-- undo/redo 命令栈（command pattern）
+  → 修正：`format`/`documentID`/`activeLayerID`/`id`/`isVisible`/`flipX`/`flipY`/`sampling`；
+  `imageFile` 为裸文件名且须严格等于 `"<id>.png"`；新增 `colorSpace` 校验与 `resolution` 可选字段
+- 读 1–11（宽松忽略未知字段，v4+ 特性静默丢弃），写声明 v3；见 `docs/project-format.md`
+- 分组校验（parentID 存在性、防环、64 层上限、分组无图/必须 Normal 混合）、visibility 继承语义、
+  分组不透明度乘法继承（对标 `LayerHierarchy` / `LayerOpacity`）
+- 拒绝测试：4 MiB manifest、10000 层、重名、空名、坏路径、v1 分组、v2 非默认外观、坏 transform 等（35 个测试）
+- undo/redo：`DocumentHistory`（不可变快照栈，默认上限 100，`commit`/`undo`/`redo`/`clear`）
 
 验收：与 Mac 版互导一个多图层 `.comp` 文件夹，图层顺序/不透明度/混合模式一致。
 
