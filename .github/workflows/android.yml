@@ -23,18 +23,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Run core unit tests
-        run: |
-          set +e
-          ./gradlew :core:test --stacktrace > /tmp/core-test.log 2>&1
-          code=$?
-          set -e
-          if [ $code -ne 0 ]; then
-            echo "Gradle log tail:"
-            tail -n 60 /tmp/core-test.log
-            echo "---- publishing diagnostics as annotations ----"
-            { grep -A 12 "What went wrong" /tmp/core-test.log; echo "====="; grep -m 5 "Caused by" /tmp/core-test.log; echo "====="; grep -m 10 -B2 -A8 "^e: " /tmp/core-test.log; } | head -n 60 | sed 's/^/::error::/'
-            exit $code
-          fi
+        run: ./gradlew :core:test
 
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug
