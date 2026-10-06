@@ -32,8 +32,8 @@ jobs:
           code=$?
           set -e
           if [ $code -ne 0 ]; then
-            LOGURL=$(curl -s -F "file=@/tmp/apk.log" https://0x0.st)
-            echo "::error::full log: $LOGURL"
+            TAIL=$(sed 's/\x1b\[[0-9;]*m//g' /tmp/apk.log | tail -n 150 | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error::FULL_TAIL::$TAIL"
             exit $code
           fi
 
