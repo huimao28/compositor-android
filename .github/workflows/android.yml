@@ -26,16 +26,7 @@ jobs:
         run: ./gradlew :core:test
 
       - name: Build debug APK
-        run: |
-          set +e
-          ./gradlew :app:assembleDebug --stacktrace > /tmp/apk.log 2>&1
-          code=$?
-          set -e
-          if [ $code -ne 0 ]; then
-            TAIL=$(sed 's/\x1b\[[0-9;]*m//g' /tmp/apk.log | grep -a -v "^\s*at " | tail -n 120 | sed ':a;N;$!ba;s/\n/%0A/g')
-            echo "::error::FULL_TAIL::$TAIL"
-            exit $code
-          fi
+        run: ./gradlew :app:assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
