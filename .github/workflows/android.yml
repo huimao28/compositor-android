@@ -26,7 +26,18 @@ jobs:
         run: ./gradlew :core:test
 
       - name: Build debug APK
-        run: ./gradlew :app:assembleDebug
+        run: |
+          set -o pipefail
+          ./gradlew :app:assembleDebug --console=plain 2>&1 | tee build.log
+
+      - name: Surface Kotlin errors as annotations
+        if: failure()
+        run: |
+          grep -E "^e: " build.log | head -30 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          echo "--- full log tail ---"
+          tail -40 build.log
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
