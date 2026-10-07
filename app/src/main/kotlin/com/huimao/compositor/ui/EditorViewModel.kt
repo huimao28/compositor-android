@@ -35,6 +35,7 @@ import com.huimao.compositor.core.setLayerOpacity
 import com.huimao.compositor.core.setLayerVisible
 import com.huimao.compositor.core.moveLayer
 import com.huimao.compositor.core.toLayerPixels
+import com.huimao.compositor.core.visibleLayers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
