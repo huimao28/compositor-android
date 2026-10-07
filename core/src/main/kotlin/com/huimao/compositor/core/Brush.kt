@@ -55,10 +55,24 @@ fun dabCoverage(d: Float, hardness: Float, diameter: Float): Float {
 }
 
 /**
+ * A pointer sample in layer pixels. [pressure] is 0..1 (stylus); touch
+ * without pressure data reports 1.
+ */
+data class StrokePoint(val x: Float, val y: Float, val pressure: Float = 1f)
+
+/**
  * Paints one stroke onto [base] and returns the new raster.
  * [points] is the pointer path in raster pixels; at least one point.
  */
-fun applyStroke(base: RasterImage, points: List<Pair<Float, Float>>, tip: BrushTip): RasterImage {
+@JvmName("applyStrokePairs")
+fun applyStroke(base: RasterImage, points: List<Pair<Float, Float>>, tip: BrushTip): RasterImage =
+    applyStroke(base, points.map { StrokePoint(it.first, it.second) }, tip)
+
+/**
+ * Pressure-aware variant: the dab diameter scales with [StrokePoint.pressure]
+ * (stylus), so light touches paint thinner dabs.
+ */
+fun applyStroke(base: RasterImage, points: List<StrokePoint>, tip: BrushTip): RasterImage {
     require(points.isNotEmpty()) { "stroke needs at least one point" }
     val out = base.copy()
     if (tip.opacity <= 0f || alphaOf(tip.color) == 0) return out
@@ -66,16 +80,24 @@ fun applyStroke(base: RasterImage, points: List<Pair<Float, Float>>, tip: BrushT
     // 1. Accumulate dabs into a transparent overlay …
     val overlay = RasterImage.transparent(base.width, base.height)
     val spacing = dabSpacing(tip).coerceAtLeast(0.5f)
-    stampDab(overlay, points[0].first, points[0].second, tip)
+    stampDab(overlay, points[0], tip)
     var carry = 0f
     for (i in 1 until points.size) {
-        val (x0, y0) = points[i - 1]
-        val (x1, y1) = points[i]
-        val dist = hypot(x1 - x0, y1 - y0)
+        val p0 = points[i - 1]
+        val p1 = points[i]
+        val dist = hypot(p1.x - p0.x, p1.y - p0.y)
         var d = spacing - carry
         while (d < dist) {
             val t = d / dist
-            stampDab(overlay, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, tip)
+            stampDab(
+                overlay,
+                StrokePoint(
+                    p0.x + (p1.x - p0.x) * t,
+                    p0.y + (p1.y - p0.y) * t,
+                    p0.pressure + (p1.pressure - p0.pressure) * t,
+                ),
+                tip,
+            )
             d += spacing
         }
         carry = (dist - (d - spacing)).coerceAtLeast(0f)
@@ -93,18 +115,19 @@ fun applyStroke(base: RasterImage, points: List<Pair<Float, Float>>, tip: BrushT
     return out
 }
 
-private fun stampDab(dst: RasterImage, cx: Float, cy: Float, tip: BrushTip) {
-    val radius = tip.diameter / 2f
-    val x0 = (cx - radius).toInt()
-    val x1 = (cx + radius).toInt()
-    val y0 = (cy - radius).toInt()
-    val y1 = (cy + radius).toInt()
+private fun stampDab(dst: RasterImage, p: StrokePoint, tip: BrushTip) {
+    val diameter = tip.diameter * (0.35f + 0.65f * p.pressure.coerceIn(0f, 1f))
+    val radius = diameter / 2f
+    val x0 = (p.x - radius).toInt()
+    val x1 = (p.x + radius).toInt()
+    val y0 = (p.y - radius).toInt()
+    val y1 = (p.y + radius).toInt()
     val paintA = alphaOf(tip.color) / 255.0
     for (y in y0..y1) {
         for (x in x0..x1) {
             if (!dst.inBounds(x, y)) continue
-            val d = hypot(x + 0.5f - cx, y + 0.5f - cy) / radius
-            val coverage = dabCoverage(d, tip.hardness, tip.diameter)
+            val d = hypot(x + 0.5f - p.x, y + 0.5f - p.y) / radius
+            val coverage = dabCoverage(d, tip.hardness, diameter)
             if (coverage <= 0f) continue
             val dab = argb(
                 (paintA * coverage * 255.0 + 0.5).toInt(),

@@ -21,9 +21,23 @@ fun compositeDocument(
     val out = RasterImage.transparent(document.width, document.height)
     for (layer in document.visibleLayers()) {
         val raster = rasters[layer.id] ?: continue
-        drawLayer(out, layer, raster, document)
+        compositeLayerOver(out, document, layer, raster)
     }
     return out
+}
+
+/**
+ * Draws one layer over [dst] (mutated in place). Public so the `:app` shell
+ * can composite a live stroke preview over a cached base image without
+ * re-compositing the whole document per pointer move.
+ */
+fun compositeLayerOver(
+    dst: RasterImage,
+    document: Document,
+    layer: Layer,
+    raster: RasterImage,
+) {
+    drawLayer(dst, layer, raster, document)
 }
 
 private fun drawLayer(
@@ -119,4 +133,49 @@ private fun bilinear(src: RasterImage, lx: Float, ly: Float): Int {
         (g / a * 255f + 0.5f).toInt(),
         (b / a * 255f + 0.5f).toInt(),
     )
+}
+
+/**
+ * Inverse of the placement transform: document pixels → layer raster pixels.
+ * Used to route pointer input to the layer being painted. Null when the
+ * transform is degenerate (zero scale).
+ */
+fun Layer.toLayerPixels(docX: Double, docY: Double, rasterWidth: Int, rasterHeight: Int): Pair<Double, Double>? {
+    val t = transform
+    if (rasterWidth <= 0 || rasterHeight <= 0) return null
+    if (t.width <= 0.0 || t.height <= 0.0) return null
+    val radians = Math.toRadians(t.rotation)
+    val cosR = cos(radians)
+    val sinR = sin(radians)
+    val cx = t.width / 2.0
+    val cy = t.height / 2.0
+    // Untranslate, unrotate (counterclockwise), unscale, unflip.
+    val px = docX - t.x
+    val py = docY - t.y
+    val ux = cx + (px - cx) * cosR + (py - cy) * sinR
+    val uy = cy - (px - cx) * sinR + (py - cy) * cosR
+    var lx = ux * rasterWidth / t.width
+    var ly = uy * rasterHeight / t.height
+    if (t.flipX) lx = rasterWidth - lx
+    if (t.flipY) ly = rasterHeight - ly
+    return lx to ly
+}
+
+/**
+ * Like [compositeDocument], but [layerId]'s raster is replaced by [replacement]
+ * (e.g. a live stroke preview). Exact: the replacement goes through the same
+ * blend/opacity/transform path as a committed raster.
+ */
+fun compositeDocumentReplacing(
+    document: Document,
+    rasters: Map<String, RasterImage>,
+    layerId: String,
+    replacement: RasterImage,
+): RasterImage {
+    val out = RasterImage.transparent(document.width, document.height)
+    for (layer in document.visibleLayers()) {
+        val raster = if (layer.id == layerId) replacement else rasters[layer.id] ?: continue
+        compositeLayerOver(out, document, layer, raster)
+    }
+    return out
 }

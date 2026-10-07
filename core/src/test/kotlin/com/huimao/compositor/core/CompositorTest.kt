@@ -146,4 +146,55 @@ class CompositorTest {
         val out = compositeDocument(doc, mapOf("child" to rChild))
         for (p in out.pixels) assertEquals(0, p)
     }
+
+    @Test
+    fun `toLayerPixels inverts the placement transform`() {
+        val layer = Layer(
+            id = "l", name = "l",
+            transform = Transform(x = 30.0, y = 40.0, width = 200.0, height = 100.0, rotation = 30.0, flipX = true),
+        )
+        // Forward-map a layer pixel through the same math as drawLayer, then invert.
+        val (lx, ly) = 25.0 to 60.0
+        val w = 100
+        val h = 80
+        val t = layer.transform
+        val radians = Math.toRadians(t.rotation)
+        val cosR = kotlin.math.cos(radians)
+        val sinR = kotlin.math.sin(radians)
+        val cx = t.width / 2.0
+        val cy = t.height / 2.0
+        val fx = if (t.flipX) w - lx else lx
+        val sx = fx * t.width / w
+        val sy = ly * t.height / h
+        val dx = cx + (sx - cx) * cosR - (sy - cy) * sinR + t.x
+        val dy = cy + (sx - cx) * sinR + (sy - cy) * cosR + t.y
+        val (ix, iy) = layer.toLayerPixels(dx, dy, w, h)!!
+        org.junit.Assert.assertEquals(lx, ix, 1e-9)
+        org.junit.Assert.assertEquals(ly, iy, 1e-9)
+    }
+
+    @Test
+    fun `toLayerPixels rejects degenerate transforms`() {
+        val bad = Layer(id = "b", name = "b", transform = Transform(x = 0.0, y = 0.0, width = 0.0, height = 10.0))
+        org.junit.Assert.assertNull(bad.toLayerPixels(5.0, 5.0, 10, 10))
+    }
+
+    @Test
+    fun `replacing equals full composite with swapped raster`() {
+        val (bottom, rBottom) = layerWith(
+            "bottom", RasterImage.filled(3, 3, argb(255, 0, 0, 255)),
+            transform = Transform(x = 0.0, y = 0.0, width = 3.0, height = 3.0),
+        )
+        val (top, rTop) = layerWith(
+            "top", RasterImage.filled(3, 3, argb(255, 255, 0, 0)),
+            blend = BlendMode.MULTIPLY, opacity = 0.7,
+            transform = Transform(x = 0.0, y = 0.0, width = 3.0, height = 3.0),
+        )
+        val doc = Document(width = 3, height = 3, layers = listOf(bottom, top))
+        val rasters = mapOf("bottom" to rBottom, "top" to rTop)
+        val replacement = RasterImage.filled(3, 3, argb(255, 0, 255, 0))
+        val a = compositeDocumentReplacing(doc, rasters, "top", replacement)
+        val b = compositeDocument(doc, rasters + ("top" to replacement))
+        assertEquals(a, b)
+    }
 }

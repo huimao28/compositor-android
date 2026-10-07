@@ -88,6 +88,18 @@ class BrushTest {
     }
 
     @Test
+    fun `pressure thins the dab`() {
+        val tip = BrushTip(diameter = 20f, hardness = 1f, opacity = 1f, color = argb(255, 255, 0, 0))
+        val full = applyStroke(RasterImage.transparent(40, 40), listOf(StrokePoint(20f, 20f, 1f)), tip)
+        val light = applyStroke(RasterImage.transparent(40, 40), listOf(StrokePoint(20f, 20f, 0.1f)), tip)
+        fun paintedCount(r: RasterImage) = r.pixels.count { alphaOf(it) > 0 }
+        assertTrue(paintedCount(light) < paintedCount(full))
+        // Center still fully painted either way.
+        assertEquals(argb(255, 255, 0, 0), full[20, 20])
+        assertEquals(argb(255, 255, 0, 0), light[20, 20])
+    }
+
+    @Test
     fun `dab coverage is 1 at center and 0 outside`() {
         assertEquals(1f, dabCoverage(0f, 0f, 10f), 1e-6f)
         assertEquals(0f, dabCoverage(1f, 0f, 10f), 1e-6f)

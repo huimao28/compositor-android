@@ -4,27 +4,74 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlin.math.roundToInt
 
 /**
- * 画布：棋盘格透明背景 + :core 合成后的真实图像。
- * [image] 为 null 时只显示棋盘格。
+ * 画布：棋盘格透明背景 + 合成图；承载画笔/缩放/平移手势。
+ * 视图变换（scale/offset）由 ViewModel 持有，手势回调里做 screen→document 映射。
  */
 @Composable
-fun CanvasArea(
-    image: ImageBitmap?,
-    modifier: Modifier = Modifier,
-) {
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
+fun CanvasArea(vm: EditorViewModel, modifier: Modifier = Modifier) {
+    val image by vm.display.collectAsStateWithLifecycle()
+    var lastFitNonce by remember { mutableStateOf(-1) }
+
+    Box(
+        modifier = modifier.onSizeChanged { size ->
+            if (size.width > 0 && lastFitNonce != vm.fitNonce) {
+                lastFitNonce = vm.fitNonce
+                vm.fitToView(size.width.toFloat(), size.height.toFloat())
+            }
+        },
+    ) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .editorGestures(
+                    brushActive = vm.tool == EditorTool.BRUSH,
+                    onStrokeStart = { screen, pressure, stylus ->
+                        vm.beginStroke(screen, pressure, stylus)
+                    },
+                    onStrokeMove = { screen, pressure, _ ->
+                        vm.addStrokePoint(screen, pressure)
+                    },
+                    onStrokeEnd = { commit ->
+                        vm.endStroke(commit)
+                    },
+                    onZoomPan = { centroid, pan, zoom ->
+                        vm.applyZoomPan(centroid, pan, zoom)
+                    },
+                ),
+        ) {
             drawCheckerboard()
-            image?.let { drawFittedImage(it) }
+            val bmp = image
+            if (bmp != null) {
+                val doc = vm.session.document
+                drawImage(
+                    image = bmp,
+                    dstOffset = IntOffset(
+                        vm.viewOffset.x.roundToInt(),
+                        vm.viewOffset.y.roundToInt(),
+                    ),
+                    dstSize = IntSize(
+                        (doc.width * vm.viewScale).roundToInt().coerceAtLeast(1),
+                        (doc.height * vm.viewScale).roundToInt().coerceAtLeast(1),
+                    ),
+                )
+            }
         }
     }
 }
@@ -50,19 +97,4 @@ private fun DrawScope.drawCheckerboard() {
         y += cell
         row++
     }
-}
-
-/** 等比适配画布区域，居中绘制。 */
-private fun DrawScope.drawFittedImage(image: ImageBitmap) {
-    val scale = minOf(size.width / image.width, size.height / image.height)
-    val dstW = image.width * scale
-    val dstH = image.height * scale
-    drawImage(
-        image = image,
-        dstOffset = androidx.compose.ui.unit.IntOffset(
-            ((size.width - dstW) / 2).toInt(),
-            ((size.height - dstH) / 2).toInt(),
-        ),
-        dstSize = androidx.compose.ui.unit.IntSize(dstW.toInt(), dstH.toInt()),
-    )
 }
