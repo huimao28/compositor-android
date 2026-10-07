@@ -173,13 +173,15 @@ private fun LayerControls(vm: EditorViewModel, layer: Layer) {
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("不透明度", style = MaterialTheme.typography.labelMedium)
+            val shown = vm.opacityPreview[layer.id] ?: layer.opacity.toFloat()
             Slider(
-                value = layer.opacity.toFloat(),
-                onValueChange = { vm.setLayerOpacity(layer.id, it) },
+                value = shown,
+                onValueChange = { vm.previewOpacity(layer.id, it) },
+                onValueChangeFinished = { vm.commitOpacity(layer.id) },
                 valueRange = 0f..1f,
                 modifier = Modifier.weight(1f),
             )
-            Text("${(layer.opacity * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
+            Text("${(shown * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("混合模式", style = MaterialTheme.typography.labelMedium)

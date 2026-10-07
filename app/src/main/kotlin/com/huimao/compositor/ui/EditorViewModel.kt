@@ -12,6 +12,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.huimao.compositor.core.BlendMode
 import com.huimao.compositor.core.BrushTip
+import com.huimao.compositor.core.Document
 import com.huimao.compositor.core.Layer
 import com.huimao.compositor.core.LayerKind
 import com.huimao.compositor.core.PixelHistory
@@ -23,7 +24,7 @@ import com.huimao.compositor.core.addRasterLayer
 import com.huimao.compositor.core.applyStroke
 import com.huimao.compositor.core.argb
 import com.huimao.compositor.core.compositeDocument
-import com.huimao.compositor.core.compositeDocumentReplacing
+import com.huimao.compositor.core.compositeLayerOver
 import com.huimao.compositor.core.deleteLayer
 import com.huimao.compositor.core.newPixelSession
 import com.huimao.compositor.core.paintStroke
@@ -87,7 +88,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var strokeTip: BrushTip? = null
     private val strokePoints = mutableListOf<StrokePoint>()
     private var renderJob: Job? = null
-    private var baseCache: Pair<PixelSession, RasterImage>? = null
+    private var baseCache: Pair<Pair<PixelSession, Map<String, Float>>, RasterImage>? = null
+    // Composite of the visible layers strictly below the stroking layer,
+    // cached for the stroke's lifetime so preview frames stay cheap.
+    private var belowCache: BelowCache? = null
+    private data class BelowCache(val key: Any, val image: RasterImage)
+
+    /** Live opacity preview while a slider drags; committed on release. */
+    var opacityPreview by mutableStateOf<Map<String, Float>>(emptyMap())
+        private set
 
     init {
         refreshDisplay()
@@ -100,6 +109,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         canUndo = history.canUndo
         canRedo = history.canRedo
         baseCache = null
+        belowCache = null
         refreshDisplay()
     }
 
@@ -195,8 +205,31 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun setLayerVisible(id: String, visible: Boolean) =
         commit(session.setLayerVisible(id, visible))
 
-    fun setLayerOpacity(id: String, opacity: Float) =
-        commit(session.setLayerOpacity(id, opacity.toDouble()))
+    /**
+     * Slider drag: preview only, no history entry and no blocking — the
+     * display refresh is coalesced by cancelling the in-flight job.
+     */
+    fun previewOpacity(id: String, opacity: Float) {
+        opacityPreview = opacityPreview + (id to opacity)
+        refreshDisplay()
+    }
+
+    /** Slider release: the previewed value becomes one undo step. */
+    fun commitOpacity(id: String) {
+        val o = opacityPreview[id] ?: return
+        opacityPreview = opacityPreview - id
+        commit(session.setLayerOpacity(id, o.toDouble()))
+    }
+
+    /** The document as currently displayed (opacity previews applied). */
+    private fun displayDocument(): Document {
+        if (opacityPreview.isEmpty()) return session.document
+        return session.document.copy(
+            layers = session.document.layers.map { l ->
+                opacityPreview[l.id]?.let { l.copy(opacity = it.toDouble()) } ?: l
+            },
+        )
+    }
 
     fun setLayerBlendMode(id: String, mode: BlendMode) =
         commit(session.setLayerBlendMode(id, mode))
@@ -221,6 +254,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         strokeTip = brushTip
         strokePoints.clear()
         strokePoints.add(StrokePoint(lp.first.toFloat(), lp.second.toFloat(), pressure))
+        belowCache = null
         renderFrame()
     }
 
@@ -241,6 +275,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         strokeLayer = null
         strokeTip = null
         strokeRaster = null
+        belowCache = null
         if (commitStroke && layer != null && tip != null && strokePoints.isNotEmpty()) {
             commit(session.paintStroke(layer.id, strokePoints.toList(), tip))
         } else {
@@ -253,15 +288,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun refreshDisplay() {
         renderJob?.cancel()
+        // The cache key includes live opacity previews.
+        val key = session to opacityPreview
         renderJob = viewModelScope.launch(Dispatchers.Default) {
-            val base = baseCache?.takeIf { it.first == session }?.second
-                ?: compositeDocument(session.document, session.rasters)
-                    .also { baseCache = session to it }
+            val base = baseCache?.takeIf { it.first == key }?.second
+                ?: compositeDocument(displayDocument(), session.rasters)
+                    .also { baseCache = key to it }
             _display.value = base.toAndroidBitmap().asImageBitmap()
         }
     }
 
-    /** Re-renders with the in-progress stroke composited exactly (preview). */
+    /**
+     * Re-renders with the in-progress stroke composited exactly (preview).
+     * Only the layers at/above the stroking layer are redrawn per frame;
+     * everything below is cached for the stroke's lifetime.
+     */
     private fun renderFrame() {
         val layer = strokeLayer
         val base = strokeRaster
@@ -271,10 +312,31 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val points = strokePoints.toList()
+        val doc = displayDocument()
+        val layers = doc.visibleLayers()
+        val idx = layers.indexOfFirst { it.id == layer.id }
+        if (idx < 0) {
+            refreshDisplay()
+            return
+        }
+        val cacheKey = Triple(session, layer.id, opacityPreview)
         renderJob?.cancel()
         renderJob = viewModelScope.launch(Dispatchers.Default) {
+            val below = belowCache?.takeIf { it.key == cacheKey }?.image
+                ?: RasterImage.transparent(doc.width, doc.height).also { img ->
+                    for (i in 0 until idx) {
+                        val l = layers[i]
+                        compositeLayerOver(img, doc, l, session.rasters[l.id] ?: continue)
+                    }
+                    belowCache = BelowCache(cacheKey, img)
+                }
             val stroked = applyStroke(base, points, tip)
-            val frame = compositeDocumentReplacing(session.document, session.rasters, layer.id, stroked)
+            val frame = below.copy()
+            compositeLayerOver(frame, doc, layers[idx], stroked)
+            for (i in idx + 1 until layers.size) {
+                val l = layers[i]
+                compositeLayerOver(frame, doc, l, session.rasters[l.id] ?: continue)
+            }
             _display.value = frame.toAndroidBitmap().asImageBitmap()
         }
     }
