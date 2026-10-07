@@ -197,4 +197,17 @@ class CompositorTest {
         val b = compositeDocument(doc, rasters + ("top" to replacement))
         assertEquals(a, b)
     }
+
+    @Test
+    fun `toDocPixels round trips with toLayerPixels`() {
+        val layer = Layer(
+            id = "l", name = "l",
+            transform = Transform(x = 30.0, y = 40.0, width = 200.0, height = 100.0, rotation = 30.0, flipY = true),
+        )
+        val (lx, ly) = 25.0 to 60.0
+        val (dx, dy) = layer.toDocPixels(lx, ly, 100, 80)
+        val (ix, iy) = layer.toLayerPixels(dx, dy, 100, 80)!!
+        assertEquals(lx, ix, 1e-9)
+        assertEquals(ly, iy, 1e-9)
+    }
 }

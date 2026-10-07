@@ -105,4 +105,33 @@ class BrushTest {
         assertEquals(0f, dabCoverage(1f, 0f, 10f), 1e-6f)
         assertEquals(0f, dabCoverage(1.5f, 1f, 10f), 1e-6f)
     }
+
+    @Test
+    fun `walkDabs emits first point plus spaced dabs`() {
+        val tip = BrushTip(diameter = 10f, hardness = 1f, opacity = 1f, color = argb(255, 255, 0, 0))
+        // Hard tip: spacing = max(1.5% of 10, 0.5) = 0.5; 100px line -> first + 199 dabs.
+        val dabs = strokeDabs(listOf(StrokePoint(0f, 0f), StrokePoint(100f, 0f)), tip)
+        assertEquals(1 + 199, dabs.size)
+        assertEquals(0f, dabs[0].x, 1e-6f)
+        // Dab spacing is uniform after the first.
+        val gaps = dabs.zipWithNext { a, b -> b.x - a.x }
+        assertTrue(gaps.all { it > 0.49f && it < 0.51f })
+    }
+
+    @Test
+    fun `walkSegment threads carry across segments`() {
+        val tip = BrushTip(diameter = 10f, hardness = 1f, opacity = 1f, color = argb(255, 255, 0, 0))
+        val spacing = (dabSpacing(tip).coerceAtLeast(0.5f))
+        var carry = 0f
+        val all = mutableListOf<StrokePoint>()
+        val pts = listOf(StrokePoint(0f, 0f), StrokePoint(60f, 0f), StrokePoint(100f, 0f))
+        all.add(pts[0])
+        for (i in 1 until pts.size) {
+            carry = walkSegment(pts[i - 1], pts[i], carry, spacing) { all.add(it) }
+        }
+        // Same dab positions as the one-shot walk.
+        val direct = mutableListOf<StrokePoint>()
+        walkDabs(pts, tip) { direct.add(it) }
+        assertEquals(direct.map { it.x }, all.map { it.x })
+    }
 }

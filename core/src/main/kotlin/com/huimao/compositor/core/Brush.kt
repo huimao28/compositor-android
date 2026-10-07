@@ -69,6 +69,63 @@ fun applyStroke(base: RasterImage, points: List<Pair<Float, Float>>, tip: BrushT
     applyStroke(base, points.map { StrokePoint(it.first, it.second) }, tip)
 
 /**
+ * A single dab of the tip: center ([x], [y]) and [diameter] in layer pixels,
+ * [alpha] is the paint alpha (tip color alpha, before the stroke opacity cap).
+ */
+data class Dab(val x: Float, val y: Float, val diameter: Float, val alpha: Float)
+
+/** Dab spec at [p] (pressure scales the diameter). */
+fun dabAt(p: StrokePoint, tip: BrushTip): Dab {
+    val diameter = tip.diameter * (0.35f + 0.65f * p.pressure.coerceIn(0f, 1f))
+    return Dab(p.x, p.y, diameter, alphaOf(tip.color) / 255f)
+}
+
+/**
+ * Walks the dabs of segment [p0]→[p1], calling [emit] for each.
+ * Returns the carry distance into the next segment (dab spacing phase).
+ */
+fun walkSegment(
+    p0: StrokePoint,
+    p1: StrokePoint,
+    carry: Float,
+    spacing: Float,
+    emit: (StrokePoint) -> Unit,
+): Float {
+    val dist = hypot(p1.x - p0.x, p1.y - p0.y)
+    var d = spacing - carry
+    while (d < dist) {
+        val t = d / dist
+        emit(
+            StrokePoint(
+                p0.x + (p1.x - p0.x) * t,
+                p0.y + (p1.y - p0.y) * t,
+                p0.pressure + (p1.pressure - p0.pressure) * t,
+            ),
+        )
+        d += spacing
+    }
+    return (dist - (d - spacing)).coerceAtLeast(0f)
+}
+
+/** Walks every dab center of the path (first point, then segments). */
+fun walkDabs(points: List<StrokePoint>, tip: BrushTip, emit: (StrokePoint) -> Unit) {
+    if (points.isEmpty()) return
+    emit(points[0])
+    val spacing = dabSpacing(tip).coerceAtLeast(0.5f)
+    var carry = 0f
+    for (i in 1 until points.size) {
+        carry = walkSegment(points[i - 1], points[i], carry, spacing, emit)
+    }
+}
+
+/** Dab specs for the whole path (layer pixels). */
+fun strokeDabs(points: List<StrokePoint>, tip: BrushTip): List<Dab> {
+    val dabs = mutableListOf<Dab>()
+    walkDabs(points, tip) { dabs.add(dabAt(it, tip)) }
+    return dabs
+}
+
+/**
  * Pressure-aware variant: the dab diameter scales with [StrokePoint.pressure]
  * (stylus), so light touches paint thinner dabs.
  */
@@ -79,29 +136,7 @@ fun applyStroke(base: RasterImage, points: List<StrokePoint>, tip: BrushTip): Ra
 
     // 1. Accumulate dabs into a transparent overlay …
     val overlay = RasterImage.transparent(base.width, base.height)
-    val spacing = dabSpacing(tip).coerceAtLeast(0.5f)
-    stampDab(overlay, points[0], tip)
-    var carry = 0f
-    for (i in 1 until points.size) {
-        val p0 = points[i - 1]
-        val p1 = points[i]
-        val dist = hypot(p1.x - p0.x, p1.y - p0.y)
-        var d = spacing - carry
-        while (d < dist) {
-            val t = d / dist
-            stampDab(
-                overlay,
-                StrokePoint(
-                    p0.x + (p1.x - p0.x) * t,
-                    p0.y + (p1.y - p0.y) * t,
-                    p0.pressure + (p1.pressure - p0.pressure) * t,
-                ),
-                tip,
-            )
-            d += spacing
-        }
-        carry = (dist - (d - spacing)).coerceAtLeast(0f)
-    }
+    walkDabs(points, tip) { stampDab(overlay, it, tip) }
 
     // 2. … then lay the overlay down with the tip opacity capping the stroke.
     val opacity = tip.opacity.toDouble()

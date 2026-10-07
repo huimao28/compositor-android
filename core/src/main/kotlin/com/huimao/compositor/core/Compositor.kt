@@ -136,6 +136,37 @@ private fun bilinear(src: RasterImage, lx: Float, ly: Float): Int {
 }
 
 /**
+ * Forward placement transform: layer raster pixels → document pixels.
+ * The inverse of [toLayerPixels]; used to position live brush-preview dabs.
+ */
+fun Layer.toDocPixels(lx: Double, ly: Double, rasterWidth: Int, rasterHeight: Int): Pair<Double, Double> {
+    val t = transform
+    var fx = lx
+    var fy = ly
+    if (t.flipX) fx = rasterWidth - fx
+    if (t.flipY) fy = rasterHeight - fy
+    val sx = if (rasterWidth > 0) fx * t.width / rasterWidth else 0.0
+    val sy = if (rasterHeight > 0) fy * t.height / rasterHeight else 0.0
+    val radians = Math.toRadians(t.rotation)
+    val cosR = cos(radians)
+    val sinR = sin(radians)
+    val cx = t.width / 2.0
+    val cy = t.height / 2.0
+    val rx = cx + (sx - cx) * cosR - (sy - cy) * sinR
+    val ry = cy + (sx - cx) * sinR + (sy - cy) * cosR
+    return (rx + t.x) to (ry + t.y)
+}
+
+/**
+ * Mean pixel scale of the placement transform (for scaling dab diameters
+ * into document space; rotation/flips don't change the magnitude).
+ */
+fun Layer.docScale(rasterWidth: Int, rasterHeight: Int): Double {
+    if (rasterWidth <= 0 || rasterHeight <= 0) return 1.0
+    return (transform.width / rasterWidth + transform.height / rasterHeight) / 2.0
+}
+
+/**
  * Inverse of the placement transform: document pixels → layer raster pixels.
  * Used to route pointer input to the layer being painted. Null when the
  * transform is degenerate (zero scale).

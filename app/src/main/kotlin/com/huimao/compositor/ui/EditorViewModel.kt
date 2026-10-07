@@ -3,6 +3,7 @@ package com.huimao.compositor.ui
 import android.app.Application
 import android.net.Uri
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
@@ -12,6 +13,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.huimao.compositor.core.BlendMode
 import com.huimao.compositor.core.BrushTip
+import com.huimao.compositor.core.Dab
 import com.huimao.compositor.core.Document
 import com.huimao.compositor.core.Layer
 import com.huimao.compositor.core.LayerKind
@@ -25,7 +27,11 @@ import com.huimao.compositor.core.applyStroke
 import com.huimao.compositor.core.argb
 import com.huimao.compositor.core.compositeDocument
 import com.huimao.compositor.core.compositeLayerOver
+import com.huimao.compositor.core.dabAt
+import com.huimao.compositor.core.dabCoverage
+import com.huimao.compositor.core.dabSpacing
 import com.huimao.compositor.core.deleteLayer
+import com.huimao.compositor.core.docScale
 import com.huimao.compositor.core.newPixelSession
 import com.huimao.compositor.core.paintStroke
 import com.huimao.compositor.core.renameLayer
@@ -34,8 +40,12 @@ import com.huimao.compositor.core.setLayerBlendMode
 import com.huimao.compositor.core.setLayerOpacity
 import com.huimao.compositor.core.setLayerVisible
 import com.huimao.compositor.core.moveLayer
+import com.huimao.compositor.core.toDocPixels
 import com.huimao.compositor.core.toLayerPixels
 import com.huimao.compositor.core.visibleLayers
+import com.huimao.compositor.core.walkSegment
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,6 +54,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class EditorTool { BRUSH, HAND }
+
+/**
+ * One dab of the live stroke preview, in document pixels.
+ * Drawn by the GPU over the last committed composite; [alpha] folds the
+ * paint alpha and the tip opacity (exact for opaque tips).
+ */
+data class PreviewDab(
+    val docX: Float,
+    val docY: Float,
+    val docDiameter: Float,
+    val alpha: Float,
+)
 
 /**
  * UI state holder. Translates gestures and panel actions into :core calls;
@@ -90,10 +112,40 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val strokePoints = mutableListOf<StrokePoint>()
     private var renderJob: Job? = null
     private var baseCache: Pair<Pair<PixelSession, Map<String, Float>>, RasterImage>? = null
-    // Composite of the visible layers strictly below the stroking layer,
-    // cached for the stroke's lifetime so preview frames stay cheap.
-    private var belowCache: BelowCache? = null
-    private data class BelowCache(val key: Any, val image: RasterImage)
+    // Composite of the visible layers strictly below a layer, cached so
+    // incremental previews (stroke on non-top layer, opacity drags) only
+    // redraw the layers at/above it.
+    private data class BelowKey(
+        val session: PixelSession,
+        val layerId: String,
+        val opacityPreview: Map<String, Float>,
+    )
+    private var belowCache: Pair<BelowKey, RasterImage>? = null
+
+    /**
+     * Live stroke preview, drawn by the GPU. Dabs are appended incrementally
+     * per pointer move (no CPU recomposite); the exact CPU composite lands
+     * on stroke commit. Only used when painting the topmost visible layer;
+     * otherwise the CPU preview path ([renderFrame]) is used.
+     */
+    val previewDabs = mutableStateListOf<PreviewDab>()
+    var previewDabColor by mutableStateOf(0)
+        private set
+    var previewDabBlend by mutableStateOf(BlendMode.NORMAL)
+        private set
+    private var dabCarry = 0f
+    private var dabLast = StrokePoint(0f, 0f)
+    private var dabSpacingVal = 0.5f
+    private var dabDocScale = 1.0
+    private var useGpuPreview = false
+    private var dabSpriteCache: Pair<Float, ImageBitmap>? = null
+    /**
+     * Bumped per stroke. A committed stroke's preview dabs are cleared
+     * atomically with the new base image ([clearPreviewToken]); a newer
+     * stroke's dabs are never cleared by an older commit.
+     */
+    private var previewToken = 0
+    private var clearPreviewToken = -1
 
     /** Live opacity preview while a slider drags; committed on release. */
     var opacityPreview by mutableStateOf<Map<String, Float>>(emptyMap())
@@ -132,6 +184,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         history = PixelHistory(newPixelSession(w, h))
         compDirUri = null
         docTitle = "未命名"
+        previewDabs.clear()
         afterHistoryChange()
         fitNonce++
     }
@@ -140,6 +193,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         history = PixelHistory(loaded)
         compDirUri = dirUri
         docTitle = title
+        previewDabs.clear()
         afterHistoryChange()
         fitNonce++
     }
@@ -212,7 +266,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun previewOpacity(id: String, opacity: Float) {
         opacityPreview = opacityPreview + (id to opacity)
-        refreshDisplay()
+        refreshOpacityPreview(id)
     }
 
     /** Slider release: the previewed value becomes one undo step. */
@@ -220,6 +274,49 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val o = opacityPreview[id] ?: return
         opacityPreview = opacityPreview - id
         commit(session.setLayerOpacity(id, o.toDouble()))
+    }
+
+    /**
+     * Incremental opacity preview: only the dragged layer and the layers
+     * above it are redrawn; everything below is cached. No history entry
+     * until [commitOpacity].
+     */
+    private fun refreshOpacityPreview(layerId: String) {
+        val doc = displayDocument()
+        val layers = doc.visibleLayers()
+        val idx = layers.indexOfFirst { it.id == layerId }
+        if (idx < 0) {
+            refreshDisplay()
+            return
+        }
+        val key = BelowKey(session, layerId, opacityPreview)
+        renderJob?.cancel()
+        renderJob = viewModelScope.launch(Dispatchers.Default) {
+            val below = belowCache?.takeIf { it.first == key }?.second
+                ?: RasterImage.transparent(doc.width, doc.height).also { img ->
+                    drawLayers(img, doc, layers, session.rasters, 0, idx)
+                    belowCache = key to img
+                }
+            val frame = below.copy()
+            val raster = session.rasters[layerId]
+            if (raster != null) compositeLayerOver(frame, doc, layers[idx], raster)
+            drawLayers(frame, doc, layers, session.rasters, idx + 1, layers.size)
+            _display.value = frame.toAndroidBitmap().asImageBitmap()
+        }
+    }
+
+    private fun drawLayers(
+        dst: RasterImage,
+        doc: Document,
+        layers: List<Layer>,
+        rasters: Map<String, RasterImage>,
+        from: Int,
+        to: Int,
+    ) {
+        for (i in from until to) {
+            val l = layers[i]
+            compositeLayerOver(dst, doc, l, rasters[l.id] ?: continue)
+        }
     }
 
     /** The document as currently displayed (opacity previews applied). */
@@ -250,23 +347,50 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val raster = session.rasters[layerId] ?: return
         val lp = layer.toLayerPixels(doc.x.toDouble(), doc.y.toDouble(), raster.width, raster.height)
             ?: return
+        val tip = brushTip
         strokeLayer = layer
         strokeRaster = raster
-        strokeTip = brushTip
+        strokeTip = tip
         strokePoints.clear()
-        strokePoints.add(StrokePoint(lp.first.toFloat(), lp.second.toFloat(), pressure))
-        belowCache = null
-        renderFrame()
+        val first = StrokePoint(lp.first.toFloat(), lp.second.toFloat(), pressure)
+        strokePoints.add(first)
+
+        // GPU preview when painting the topmost visible layer: dabs are drawn
+        // by the Canvas at 60fps; the CPU stays out of the per-frame path.
+        useGpuPreview = session.document.visibleLayers().lastOrNull()?.id == layer.id
+        previewToken++
+        if (useGpuPreview) {
+            previewDabs.clear()
+            previewDabColor = tip.color
+            previewDabBlend = layer.blendMode
+            dabDocScale = layer.docScale(raster.width, raster.height)
+            dabSpacingVal = dabSpacing(tip).coerceAtLeast(0.5f)
+            previewDabs.add(toPreviewDab(dabAt(first, tip), layer, raster, tip))
+            dabLast = first
+            dabCarry = 0f
+        } else {
+            belowCache = null
+            renderFrame()
+        }
     }
 
     fun addStrokePoint(screen: Offset, pressure: Float) {
         val layer = strokeLayer ?: return
         val raster = strokeRaster ?: return
+        val tip = strokeTip ?: return
         val doc = toDoc(screen)
         val lp = layer.toLayerPixels(doc.x.toDouble(), doc.y.toDouble(), raster.width, raster.height)
             ?: return
-        strokePoints.add(StrokePoint(lp.first.toFloat(), lp.second.toFloat(), pressure))
-        renderFrame()
+        val p = StrokePoint(lp.first.toFloat(), lp.second.toFloat(), pressure)
+        strokePoints.add(p)
+        if (useGpuPreview) {
+            dabCarry = walkSegment(dabLast, p, dabCarry, dabSpacingVal) { sp ->
+                previewDabs.add(toPreviewDab(dabAt(sp, tip), layer, raster, tip))
+            }
+            dabLast = p
+        } else {
+            renderFrame()
+        }
     }
 
     fun endStroke(commitStroke: Boolean) {
@@ -278,11 +402,48 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         strokeRaster = null
         belowCache = null
         if (commitStroke && layer != null && tip != null && strokePoints.isNotEmpty()) {
+            // Clear the GPU preview atomically with the new base image so the
+            // stroke never flickers out between commit and recomposite.
+            clearPreviewToken = previewToken
             commit(session.paintStroke(layer.id, strokePoints.toList(), tip))
         } else {
+            previewDabs.clear()
             refreshDisplay()
         }
         strokePoints.clear()
+    }
+
+    private fun toPreviewDab(dab: Dab, layer: Layer, raster: RasterImage, tip: BrushTip): PreviewDab {
+        val (dx, dy) = layer.toDocPixels(dab.x.toDouble(), dab.y.toDouble(), raster.width, raster.height)
+        return PreviewDab(
+            docX = dx.toFloat(),
+            docY = dy.toFloat(),
+            docDiameter = (dab.diameter * dabDocScale).toFloat(),
+            alpha = dab.alpha * tip.opacity,
+        )
+    }
+
+    /**
+     * White radial dab sprite; tinted with the paint color at draw time.
+     * The alpha profile matches [dabCoverage], so the GPU preview agrees
+     * with the CPU stroke for opaque tips.
+     */
+    fun dabSprite(hardness: Float): ImageBitmap {
+        val h = (hardness * 20).roundToInt() / 20f
+        dabSpriteCache?.takeIf { it.first == h }?.let { return it.second }
+        val size = 64
+        val px = IntArray(size * size)
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                val d = hypot(x + 0.5f - size / 2f, y + 0.5f - size / 2f) / (size / 2f)
+                val cov = dabCoverage(d, h, size.toFloat())
+                px[y * size + x] = ((cov * 255 + 0.5f).toInt() shl 24) or 0x00FFFFFF
+            }
+        }
+        val bmp = android.graphics.Bitmap.createBitmap(
+            px, size, size, android.graphics.Bitmap.Config.ARGB_8888,
+        )
+        return bmp.asImageBitmap().also { dabSpriteCache = h to it }
     }
 
     // ---------- display ----------
@@ -291,11 +452,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob?.cancel()
         // The cache key includes live opacity previews.
         val key = session to opacityPreview
+        val clearToken = clearPreviewToken
         renderJob = viewModelScope.launch(Dispatchers.Default) {
             val base = baseCache?.takeIf { it.first == key }?.second
                 ?: compositeDocument(displayDocument(), session.rasters)
                     .also { baseCache = key to it }
-            _display.value = base.toAndroidBitmap().asImageBitmap()
+            val bmp = base.toAndroidBitmap().asImageBitmap()
+            withContext(Dispatchers.Main) {
+                if (clearToken >= 0 && clearToken == previewToken) {
+                    previewDabs.clear()
+                    clearPreviewToken = -1
+                }
+                _display.value = bmp
+            }
         }
     }
 
@@ -320,24 +489,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             refreshDisplay()
             return
         }
-        val cacheKey = Triple(session, layer.id, opacityPreview)
+        val cacheKey = BelowKey(session, layer.id, opacityPreview)
         renderJob?.cancel()
         renderJob = viewModelScope.launch(Dispatchers.Default) {
-            val below = belowCache?.takeIf { it.key == cacheKey }?.image
+            val below = belowCache?.takeIf { it.first == cacheKey }?.second
                 ?: RasterImage.transparent(doc.width, doc.height).also { img ->
-                    for (i in 0 until idx) {
-                        val l = layers[i]
-                        compositeLayerOver(img, doc, l, session.rasters[l.id] ?: continue)
-                    }
-                    belowCache = BelowCache(cacheKey, img)
+                    drawLayers(img, doc, layers, session.rasters, 0, idx)
+                    belowCache = cacheKey to img
                 }
             val stroked = applyStroke(base, points, tip)
             val frame = below.copy()
             compositeLayerOver(frame, doc, layers[idx], stroked)
-            for (i in idx + 1 until layers.size) {
-                val l = layers[i]
-                compositeLayerOver(frame, doc, l, session.rasters[l.id] ?: continue)
-            }
+            drawLayers(frame, doc, layers, session.rasters, idx + 1, layers.size)
             _display.value = frame.toAndroidBitmap().asImageBitmap()
         }
     }
