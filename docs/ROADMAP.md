@@ -46,12 +46,17 @@
 
 验收：合成结果与桌面端像素级一致（抽样测试）；一笔 undo 还原像素精确。
 
-## Phase 3 — UI 接线
+## Phase 3 — UI 接线（✅ 已完成，2026-10-07；CI 全绿）
 
-- 图层面板接真实 Document（增删/改名/排序/可见性/不透明度/混合模式）
-- 画布手势：单指画笔、双指缩放/平移；触控笔压感（有笔时）
-- 打开/保存 `.comp`（Storage Access Framework）、导入 PNG/JPEG、导出拼合 PNG/JPEG
-- 顶栏按钮逐个接线（撤销/重做/保存/导出）
+- `:core`：`SessionOps`（图层增删/改名/排序/可见性/不透明度/混合模式/激活，纯函数不可变）；
+  画笔支持 `StrokePoint` 压感（触控笔按压改变 dab 直径）；`compositeLayerOver` /
+  `compositeDocumentReplacing`（笔触预览精确合成）；`Layer.toLayerPixels`（放置逆变换）
+- `:app`：`EditorViewModel`（PixelSession + PixelHistory，后台线程合成+精确笔触预览）、
+  `EditorGestures`（画笔单指绘画/点按单点、触控笔恒绘画+压感、第二指取消笔触转缩放平移；
+  抓手单指平移/双指缩放）、`CompIO`（SAF 打开/保存 `.comp`：manifest.json + images/&lt;id&gt;.png、
+  导入 PNG/JPEG 为新图层、导出拼合 PNG/JPEG）、工具条（画笔/抓手+笔刷设置弹窗）、
+  图层面板（真实 Document，分组缩进）、顶栏全部接线、新建文档/导出格式弹窗、snackbar 报错
+- 测试 72 个全过（本地 + CI）
 
 验收：真机/Pad 上走完「新建→画画→保存→重开」全流程。
 
